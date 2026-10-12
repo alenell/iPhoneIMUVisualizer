@@ -1,112 +1,80 @@
-import pygame
 import csv
 import math
+import pygame
 from OpenGL.GL import *
-from OpenGL.GLUT import *
 from OpenGL.GLU import *
 
-#ALEX LENELL GYROSCOPE VISUALIZATION
-#Uses values collected from Apple Iphone accelerometer and gyroscope
+alpha = 0.98
+beta = 1 - alpha
+dt = 0.02  # match your sensor's sample rate
 
-# Complementary filter coefficients
-alpha = 0.98  # Weight for gyroscope data
-beta = 1 - alpha  # Weight for accelerometer data
-dt = 0.02  # Sample time (adjust as per your requirements)
+file_sim = r'har_sample.csv'  # [ax, ay, az, gx, gy, gz], no header
 
-roll,pitch,yaw = 0,0,0
+# Accelerometer sign convention of the recording:
+#   "har"    - gravity reads positive on the axis pointing up (UCI HAR / Samsung data)
+#   "iphone" - gravity reads negative on the axis pointing up (iPhone Core Motion)
+ACCEL_CONVENTION = "har"
 
-# Initialize Pygame
+# ---------- Precompute orientation ----------
+yaw_values, pitch_values, roll_values = [], [], []
+roll = pitch = yaw = 0.0
+
+with open(file_sim, 'r') as f:
+    for i, row in enumerate(csv.reader(f)):
+        ax, ay, az, gx, gy, gz = map(float, row[:6])
+
+        if ACCEL_CONVENTION == "har":
+            pitch_acc = math.atan2(-ax, math.sqrt(ay**2 + az**2))
+            roll_acc = math.atan2(ay, az)
+        elif ACCEL_CONVENTION == "iphone":
+            pitch_acc = math.atan2(ax, math.sqrt(ay**2 + az**2))
+            roll_acc = math.atan2(-ay, -az)
+        else:
+            raise ValueError(f"Unknown ACCEL_CONVENTION: {ACCEL_CONVENTION!r}")
+
+        if i == 0:
+            pitch, roll = pitch_acc, roll_acc
+
+        # Single integration, folded into the complementary filter
+        roll = alpha * (roll + gx * dt) + beta * roll_acc
+        pitch = alpha * (pitch + gy * dt) + beta * pitch_acc
+        yaw += gz * dt
+
+        yaw_values.append(math.degrees(yaw))
+        pitch_values.append(math.degrees(pitch))
+        roll_values.append(math.degrees(roll))
+
+# ---------- Model (phone-shaped box) ----------
+w, h, d = 0.4, 0.8, 0.05
+vertices = [
+    (-w, h, -d), (w, h, -d), (w, -h, -d), (-w, -h, -d),
+    (-w, h, d),  (w, h, d),  (w, -h, d),  (-w, -h, d),
+]
+faces = [(0,1,2,3), (4,5,6,7), (0,1,5,4), (1,2,6,5), (2,3,7,6), (0,3,7,4)]
+colors = [(1,0,0), (0,1,0), (0,0,1), (1,1,0), (1,0,1), (0,1,1)]
+
+def draw_iphone():
+    glBegin(GL_QUADS)
+    for face, color in zip(faces, colors):
+        glColor3fv(color)
+        for v in face:
+            glVertex3fv(vertices[v])
+    glEnd()
+
+# ---------- Setup ----------
 pygame.init()
 display = (800, 600)
 pygame.display.set_mode(display, pygame.DOUBLEBUF | pygame.OPENGL)
-glClearColor(1.0, 1.0, 1.0, 1.0)
+glClearColor(1, 1, 1, 1)
+glEnable(GL_DEPTH_TEST)
 
-# Set up the perspective
-gluPerspective(45, (display[0] / display[1]), 0.1, 50.0)
-glTranslatef(0.0, 0.0, 1000)
+glMatrixMode(GL_PROJECTION)
+glLoadIdentity()
+gluPerspective(45, display[0] / display[1], 0.1, 50.0)
+glMatrixMode(GL_MODELVIEW)
 
-# Function to draw a cube
-# Define vertices of the iPhone model
-iphone_vertices = [
-    (-0.5, 0.5, -0.1),  # Top left corner (front)
-    (0.5, 0.5, -0.1),   # Top right corner (front)
-    (0.5, -0.5, -0.1),  # Bottom right corner (front)
-    (-0.5, -0.5, -0.1), # Bottom left corner (front)
-    (-0.5, 0.5, 0.1),   # Top left corner (back)
-    (0.5, 0.5, 0.1),    # Top right corner (back)
-    (0.5, -0.5, 0.1),   # Bottom right corner (back)
-    (-0.5, -0.5, 0.1),  # Bottom left corner (back)
-]
-
-# Define faces of the iPhone model
-iphone_faces = [
-    (0, 1, 2, 3),  # Front face
-    (4, 5, 6, 7),  # Back face
-    (0, 1, 5, 4),  # Top face
-    (1, 2, 6, 5),  # Right face
-    (2, 3, 7, 6),  # Bottom face
-    (0, 3, 7, 4),  # Left face
-]
-# Define colors for each face of the iPhone model
-iphone_colors = [
-    (1, 0, 0),  # Front face (red)
-    (0, 1, 0),  # Back face (green)
-    (0, 0, 1),  # Top face (blue)
-    (1, 1, 0),  # Right face (yellow)
-    (1, 0, 1),  # Bottom face (magenta)
-    (0, 1, 1),  # Left face (cyan)
-]
-
-# Function to draw the iPhone model with different colors for each face
-def draw_iphone():
-    for i, face in enumerate(iphone_faces):
-        glColor3fv(iphone_colors[i])
-        glBegin(GL_QUADS)
-        for vertex_index in face:
-            glVertex3fv(iphone_vertices[vertex_index])
-        glEnd()
-
-# Function to rotate the cube
-def rotate_cube(yaw, pitch, roll):
-    glLoadIdentity()  # Reset modelview matrix
-    glRotatef(yaw, 0, 1, 0)
-    glRotatef(pitch, 1, 0, 0)
-    glRotatef(roll, 0, 0, 1)
-
-yaw_values = []
-pitch_values = []
-roll_values = []
-
-#CSV File with no header, [x,y,z,x_gyro,y_gyro,z_gyro]
-file_sim = r''
-
-with open(file_sim, 'r') as file:
-    reader = csv.reader(file)
-    i=0
-    for row in reader:
-        data=row
-        ax, ay, az, gx, gy, gz = float(data[0]), float(data[1]), float(data[2]), float(data[3]), float(data[4]), float(data[5])        
-        pitch_acc = math.atan2(ax, math.sqrt(ay**2 + az**2))
-        roll_acc = math.atan2(-ay, -az)
-        
-        #Initial Orientation
-        if i==0:
-            pitch, roll = pitch_acc, roll_acc
-        # Integrate gyroscope data
-        roll += gx * dt
-        pitch += gy * dt
-        yaw += gz * dt
-        
-        # Apply complementary filter
-        pitch = alpha * (pitch + gx * dt) + beta * pitch_acc
-        roll = alpha * (roll + gy * dt) + beta * roll_acc
-        
-        yaw_values.append(float(yaw))
-        pitch_values.append(float(pitch))
-        roll_values.append(float(roll))
-        i+=1
-
-# Main loop
+# ---------- Main loop ----------
+clock = pygame.time.Clock()
 running = True
 i = 0
 while running:
@@ -115,20 +83,16 @@ while running:
             running = False
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-    
-    
-    #glLoadIdentity()
-    rotate_cube(yaw_values[i], pitch_values[i], roll_values[i])
+
+    glLoadIdentity()
+    glTranslatef(0, 0, -4)               # camera back-off, every frame
+    glRotatef(yaw_values[i],   0, 1, 0)
+    glRotatef(pitch_values[i], 1, 0, 0)
+    glRotatef(roll_values[i],  0, 0, 1)
     draw_iphone()
 
     pygame.display.flip()
-    pygame.time.wait(20)  # Delay to control rotation speed
-
-    i = (i + 1) % len(yaw_values)  # Loop back to the beginning of data
+    clock.tick(1 / dt)                   # 50 FPS to match dt
+    i = (i + 1) % len(yaw_values)
 
 pygame.quit()
-
-
-
-
-
